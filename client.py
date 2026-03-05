@@ -1,9 +1,17 @@
 import socket
 import os
 import json
+import platform
 
 client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 client_sock.connect(('127.0.0.1', 5000))
+
+name = platform.node()
+reg = {
+    'type': 'reg',
+    'name': name
+}
+client_sock.sendall(json.dumps(reg).encode())
 
 try:
     while True:

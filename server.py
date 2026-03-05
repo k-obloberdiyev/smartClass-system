@@ -2,7 +2,7 @@ import socket
 import threading
 import json
 
-clients = []
+clients = {}
 clients_lock = threading.Lock()
 
 def server_input():
@@ -32,27 +32,33 @@ def server_input():
 
         with clients_lock:
             for client in clients:
-                try:
-                    client.sendall(message.encode())
-                except:
-                    clients.remove(client)
+                client.sendall((json.dumps(message).encode()))
 
 def handle_client(client_sock, client_addr):
-    print("New Connection from", client_addr)
-    with clients_lock:
-        clients.append(client_sock)
-    try:
-        while True:
-            data = client_sock.recv(2048)
-            if not data:
-                break
-            print(f"Received from {client_addr}: {data.decode()}")
-    finally:
+
+    reg = client_sock.recv(2048)
+
+    d = json.loads(reg.decode())
+    if d['type'] == 'reg':
+        name = d['name']
+
         with clients_lock:
-            if client_sock in clients:
-                clients.remove(client_sock)
-        client_sock.close()
-        print(f"Connection closed {client_addr}")
+            clients[client_sock] = name
+
+        print(f"{name} connected from {client_addr}")
+
+        try:
+            while True:
+                data = client_sock.recv(2048)
+                if not data:
+                    break
+        finally:
+            with clients_lock:
+                if client_sock in clients:
+                    del clients[client_sock]
+
+            client_sock.close()
+            print(f"{name} disconnected")
 
 serv_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM, proto=0)
 serv_sock.bind(('127.0.0.1', 5000))
