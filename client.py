@@ -1,5 +1,6 @@
 import socket
 import os
+import json
 
 client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 client_sock.connect(('127.0.0.1', 5000))
@@ -10,16 +11,19 @@ try:
         if not data:
             continue
         
-        command = data.decode().strip()
-        print(f"Received command: {command}")
+        message = json.loads(data.decode())
+        
+        print(f"Received command: {message['do']}\n")
 
-        if command == 'LOCK': 
-            os.system("rundll32.exe user32.dll,LockWorkStation")
-        elif command == 'SHUTDOWN':
-            os.system("shutdown /s /t 0")
-        elif command.startswith('OPEN_IELTS'):
-            url = command.split(' ', 1)[1]
-            os.system("start iexplore.exe {url}")
+        if(message['type'] == 'command'):
+            do = message['do']
+            if(do == 'lock'): 
+                os.system("rundll32.exe user32.dll,LockWorkStation")
+            elif(do == 'shutdown'):
+                os.system("shutdown /s /t 0")
+            elif(do == 'OPEN_IELTS'):
+                url = message['url']
+                os.system("start iexplore.exe {url}")
 except KeyboardInterrupt:
     client_sock.close()
     

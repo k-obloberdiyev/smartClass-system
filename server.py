@@ -1,16 +1,39 @@
 import socket
 import threading
+import json
 
 clients = []
 clients_lock = threading.Lock()
 
 def server_input():
     while True:
-        command = input("Enter command for students: ")
+        message = {}
+        inp = input("Enter command for students: ")
+        if(inp == 'lock'):
+            message = {
+                'type': 'command',
+                'do': 'lock'
+            }
+        elif(inp == 'shutdown'):
+            message = {
+                'type': 'command',
+                'do': 'shutdown'
+            }
+        elif(inp.startswith('ielts')):
+            url = inp.split()[1]
+            message = {
+                'type': 'command',
+                'do': 'OPEN_IELTS',
+                'url': url
+            }
+        else: 
+            print('Error\n')
+            continue
+
         with clients_lock:
             for client in clients:
                 try:
-                    client.sendall(command.encode())
+                    client.sendall(message.encode())
                 except:
                     clients.remove(client)
 
