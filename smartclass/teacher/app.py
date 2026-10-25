@@ -10,10 +10,14 @@ import customtkinter as ctk
 
 from ..common import config
 from ..common.discovery import local_ip_addresses
-from ..common.protocol import DEFAULT_HUB_PORT, LOCK_SCREEN, OK, OPEN_URL
+from ..common.protocol import (
+    CANCEL_SHUTDOWN, DEFAULT_HUB_PORT, LOCK_SCREEN, OK, OPEN_URL, OVERLAY_LOCK, OVERLAY_UNLOCK,
+    RESTART, SHUTDOWN,
+)
 from .backend import Backend
 
 POLL_MS = 100
+SHUTDOWN_DELAY = 60
 
 
 def load_config():
@@ -40,8 +44,8 @@ class TeacherApp:
     def _build(self):
         cfg = self.backend.cfg
         self.root.title("SmartClass Teacher")
-        self.root.geometry("860x560")
-        self.root.minsize(700, 450)
+        self.root.geometry("960x640")
+        self.root.minsize(760, 560)
 
         header = ctk.CTkFrame(self.root)
         header.pack(fill=tk.X, padx=10, pady=(10, 0))
@@ -66,10 +70,11 @@ class TeacherApp:
         self.count_label = ctk.CTkLabel(left, text="Connected PCs (0)", font=ctk.CTkFont(size=16, weight="bold"))
         self.count_label.pack(pady=(6, 4))
 
-        columns = ("name", "address", "version", "result")
+        columns = ("name", "state", "address", "version", "result")
         self.tree = ttk.Treeview(left, columns=columns, show="headings", selectmode="extended", height=12)
-        for col, title, width in (("name", "Computer", 180), ("address", "Address", 120),
-                                  ("version", "Version", 70), ("result", "Last result", 220)):
+        for col, title, width in (("name", "Computer", 170), ("state", "State", 130),
+                                  ("address", "Address", 110), ("version", "Version", 60),
+                                  ("result", "Last result", 200)):
             self.tree.heading(col, text=title)
             self.tree.column(col, width=width, anchor="w")
         self.tree.pack(fill=tk.BOTH, expand=True, padx=6)
@@ -92,9 +97,26 @@ class TeacherApp:
         self.url_entry.pack(padx=10, pady=(16, 4), fill=tk.X)
         self.url_entry.bind("<Return>", lambda e: self._open_url())
         ctk.CTkButton(right, text="Open website", command=self._open_url).pack(padx=10, pady=4, fill=tk.X)
-        ctk.CTkButton(right, text="Lock screens", command=self._lock).pack(padx=10, pady=(16, 4), fill=tk.X)
+
+        self._section(right, "Lock")
+        self.lock_message = ctk.CTkEntry(right, placeholder_text="Message (optional)")
+        self.lock_message.pack(padx=10, pady=4, fill=tk.X)
+        ctk.CTkButton(right, text="Lock screens", command=self._lock).pack(padx=10, pady=4, fill=tk.X)
+        ctk.CTkButton(right, text="Unlock", command=self._unlock).pack(padx=10, pady=4, fill=tk.X)
+        ctk.CTkButton(right, text="Windows lock", fg_color="gray", command=self._windows_lock).pack(padx=10, pady=4, fill=tk.X)
+
+        self._section(right, "Power")
+        ctk.CTkButton(right, text="Restart…", fg_color="#c0392b", hover_color="#962d22",
+                      command=lambda: self._power(RESTART, "Restart")).pack(padx=10, pady=4, fill=tk.X)
+        ctk.CTkButton(right, text="Shut down…", fg_color="#c0392b", hover_color="#962d22",
+                      command=lambda: self._power(SHUTDOWN, "Shut down")).pack(padx=10, pady=4, fill=tk.X)
+        ctk.CTkButton(right, text="Cancel shutdown", fg_color="gray", command=self._cancel_shutdown).pack(padx=10, pady=4, fill=tk.X)
 
         self._update_target_label()
+
+    def _section(self, parent, title):
+        ctk.CTkLabel(parent, text=title, font=ctk.CTkFont(size=13, weight="bold"),
+                     anchor="w").pack(padx=10, pady=(14, 0), fill=tk.X)
 
     # ---- commands ----
 
@@ -121,11 +143,35 @@ class TeacherApp:
         self.url_entry.delete(0, tk.END)
 
     def _lock(self):
-        if not messagebox.askyesno("Lock screens", f"Lock {self._target_text()}?\n\n"
-                                   "Students will need their Windows password to unlock."):
+        args = {}
+        message = self.lock_message.get().strip()
+        if message:
+            args["message"] = message
+        self.backend.send_command(OVERLAY_LOCK, args, self._targets())
+        self._log(f"Lock {self._target_text()}")
+
+    def _unlock(self):
+        self.backend.send_command(OVERLAY_UNLOCK, {}, self._targets())
+        self._log(f"Unlock {self._target_text()}")
+
+    def _windows_lock(self):
+        if not messagebox.askyesno("Windows lock", f"Lock {self._target_text()} with the Windows lock screen?\n\n"
+                                   "You can't unlock these from here: students need their Windows password."):
             return
         self.backend.send_command(LOCK_SCREEN, {}, self._targets())
-        self._log(f"Lock {self._target_text()}")
+        self._log(f"Windows lock {self._target_text()}")
+
+    def _power(self, action, verb):
+        if not messagebox.askyesno(verb, f"{verb} {self._target_text()}?\n\n"
+                                   f"Students get a {SHUTDOWN_DELAY}-second warning to save their work.\n"
+                                   "You can still cancel during the countdown.", icon="warning"):
+            return
+        self.backend.send_command(action, {"delay": SHUTDOWN_DELAY}, self._targets())
+        self._log(f"{verb} {self._target_text()} in {SHUTDOWN_DELAY}s")
+
+    def _cancel_shutdown(self):
+        self.backend.send_command(CANCEL_SHUTDOWN, {}, self._targets())
+        self._log(f"Cancel shutdown on {self._target_text()}")
 
     # ---- events from the network thread ----
 
@@ -189,7 +235,8 @@ class TeacherApp:
         self.tree.delete(*self.tree.get_children())
         for aid, info in sorted(self.agents.items(), key=lambda kv: kv[1]["name"].lower()):
             self.tree.insert("", tk.END, iid=aid, values=(
-                info["name"], info["address"], info["version"], self.last_result.get(aid, ""),
+                info["name"], _state_text(info.get("state") or {}), info["address"], info["version"],
+                self.last_result.get(aid, ""),
             ))
         self.tree.selection_set([aid for aid in selection if aid in self.agents])
         self.count_label.configure(text=f"Connected PCs ({len(self.agents)})")
@@ -200,6 +247,17 @@ class TeacherApp:
         self.log_box.insert(tk.END, f"{time.strftime('%H:%M:%S')}  {text}\n")
         self.log_box.configure(state="disabled")
         self.log_box.see(tk.END)
+
+
+def _state_text(state):
+    parts = []
+    if state.get("locked"):
+        parts.append("🔒 Locked")
+    if state.get("power") == "shutdown":
+        parts.append("⏻ Shutting down")
+    elif state.get("power") == "restart":
+        parts.append("↻ Restarting")
+    return ", ".join(parts) or "Active"
 
 
 def main():

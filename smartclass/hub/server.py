@@ -118,6 +118,7 @@ class Hub:
             "version": str(hello.get("version") or ""),
             "address": ws.remote_address[0] if ws.remote_address else "",
             "connected_at": time.time(),
+            "state": {},
         })
         old = self.agents.get(agent_id)
         self.agents[agent_id] = entry
@@ -139,6 +140,10 @@ class Hub:
                         "result", agent_id=agent_id, id=msg.get("id"),
                         status=msg.get("status"), detail=msg.get("detail"),
                     ))
+                elif msg["type"] == "state" and isinstance(msg.get("state"), dict):
+                    if msg["state"] != entry.info["state"]:
+                        entry.info["state"] = msg["state"]
+                        self._notify_agents_changed()
         except ConnectionClosed:
             pass
         finally:

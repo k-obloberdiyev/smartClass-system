@@ -50,7 +50,16 @@ def main():
     parser.add_argument("--code", help="class code shown in the teacher app")
     parser.add_argument("--hub", help='hub address, e.g. 192.168.1.20 or ws://host:8765 ("" = auto-discover)')
     parser.add_argument("--name", help="display name (default: computer name)")
+    # Internal: the agent re-runs itself with these to show the lock screen.
+    parser.add_argument("--overlay", help=argparse.SUPPRESS)
+    parser.add_argument("--parent", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    if args.overlay is not None:
+        from .overlay import run as run_overlay
+
+        run_overlay(args.overlay, args.parent)
+        return
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = load_config(args)

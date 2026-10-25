@@ -11,12 +11,13 @@ Connection flow:
 Agent messages:
     hub -> agent    command  {id, action, args}
     agent -> hub    result   {id, status, detail}
+    agent -> hub    state    {state: {locked: bool, power: "shutdown" | "restart" | null}}
 
 Teacher messages:
     teacher -> hub  command  {id, targets: "all" | [agent_id, ...], action, args}
     hub -> teacher  ack      {id, sent: [agent_id], missing: [agent_id]}
     hub -> teacher  result   {agent_id, id, status, detail}
-    hub -> teacher  agents   {agents: [{id, name, os, version, address}]}
+    hub -> teacher  agents   {agents: [{id, name, os, version, address, state}]}
 """
 
 import json
@@ -33,7 +34,12 @@ TEACHER = "teacher"
 
 # Actions
 OPEN_URL = "OPEN_URL"
-LOCK_SCREEN = "LOCK_SCREEN"
+LOCK_SCREEN = "LOCK_SCREEN"  # the real Windows lock screen; needs the student's password
+OVERLAY_LOCK = "OVERLAY_LOCK"  # args: {message}
+OVERLAY_UNLOCK = "OVERLAY_UNLOCK"
+SHUTDOWN = "SHUTDOWN"  # args: {delay}
+RESTART = "RESTART"  # args: {delay}
+CANCEL_SHUTDOWN = "CANCEL_SHUTDOWN"
 
 # Result statuses
 OK = "ok"
