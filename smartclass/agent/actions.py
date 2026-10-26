@@ -7,15 +7,21 @@ raises. Student PCs are Windows; other platforms raise NotImplementedError
 so the agent can still be run on a Mac for development.
 """
 
+import base64
+import binascii
+import os
 import re
 import subprocess
 import sys
 import webbrowser
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from ..common.protocol import (
-    CANCEL_SHUTDOWN, ERROR, LOCK_SCREEN, OK, OPEN_URL, RESTART, SHUTDOWN, UNSUPPORTED,
+    CANCEL_SHUTDOWN, ERROR, LOCK_SCREEN, MAX_FILE_BYTES, MESSAGE, OK, OPEN_URL, RESTART,
+    SEND_FILE, SHUTDOWN, UNSUPPORTED,
 )
+from . import popup
 
 
 def open_url(args):
@@ -32,6 +38,59 @@ def open_url(args):
     if not webbrowser.open(url):
         raise RuntimeError("no web browser available")
     return url
+
+
+def message(args):
+    text = str(args.get("text") or "").strip()
+    if not text:
+        raise ValueError("no message text")
+    title = str(args.get("title") or "").strip() or "Message from your teacher"
+    popup.show(title, text)
+    return "shown"
+
+
+def received_files_dir():
+    downloads = Path.home() / "Downloads"
+    base = downloads if downloads.is_dir() else Path.home()
+    return base / "SmartClass"
+
+
+def _safe_name(name):
+    # Keep only the final component and drop anything that could escape the folder.
+    name = os.path.basename(str(name or "").replace("\\", "/").strip())
+    name = name.lstrip(".") or "file"
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
+
+
+def _unique_path(folder, name):
+    path = folder / name
+    if not path.exists():
+        return path
+    stem, suffix = path.stem, path.suffix
+    for i in range(1, 1000):
+        candidate = folder / f"{stem} ({i}){suffix}"
+        if not candidate.exists():
+            return candidate
+    raise FileExistsError(f"too many copies of {name}")
+
+
+def send_file(args):
+    name = _safe_name(args.get("name"))
+    try:
+        data = base64.b64decode(str(args.get("data") or ""), validate=True)
+    except (binascii.Error, ValueError):
+        raise ValueError("file data is not valid base64") from None
+    if not data:
+        raise ValueError("empty file")
+    if len(data) > MAX_FILE_BYTES:
+        raise ValueError(f"file is too large ({len(data)} bytes)")
+    folder = received_files_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    path = _unique_path(folder, name)
+    path.write_bytes(data)
+    popup.show("File from your teacher", f"Saved to your SmartClass folder:\n\n{path.name}",
+               open_path=str(folder))
+    return str(path)
 
 
 def lock_screen(args):
@@ -101,6 +160,8 @@ def cancel_shutdown(args):
 
 ACTIONS = {
     OPEN_URL: open_url,
+    MESSAGE: message,
+    SEND_FILE: send_file,
     LOCK_SCREEN: lock_screen,
     SHUTDOWN: shutdown,
     RESTART: restart,

@@ -167,9 +167,10 @@ def test_open_url_adds_https(monkeypatch):
 
 
 @pytest.mark.parametrize("given,expected", [
-    ("192.168.1.5", "ws://192.168.1.5:8765"),
-    ("192.168.1.5:9000", "ws://192.168.1.5:9000"),
+    ("192.168.1.5", "wss://192.168.1.5:8765"),
+    ("192.168.1.5:9000", "wss://192.168.1.5:9000"),
     ("ws://hub.example.com:8765", "ws://hub.example.com:8765"),
+    ("wss://hub.example.com:8765", "wss://hub.example.com:8765"),
     ("", ""),
 ])
 def test_normalize_hub_url(given, expected):

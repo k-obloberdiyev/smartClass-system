@@ -18,9 +18,14 @@ from ..common.protocol import (
     AGENT,
     CLOSE_AUTH_FAILED,
     CLOSE_BAD_HELLO,
+    CLOSE_DENIED,
     CLOSE_REPLACED,
     DEFAULT_HUB_PORT,
+    MAX_WS_SIZE,
+    MONITOR_INTERVAL,
     TEACHER,
+    THUMBNAIL_MAX,
+    THUMBNAIL_QUALITY,
     ProtocolError,
     decode,
     encode,
@@ -40,20 +45,39 @@ class _Agent:
     def __init__(self, ws, info):
         self.ws = ws
         self.info = info
+        self.monitoring = False  # whether we've told this agent to stream its screen
+        self.approval = None  # a Future, set by the teacher, while awaiting approval
 
 
 class Hub:
     def __init__(self, class_code, teacher_key, host="0.0.0.0", port=DEFAULT_HUB_PORT,
-                 discovery_port=None, name="SmartClass"):
-        """discovery_port=None disables answering LAN discovery probes."""
+                 discovery_port=None, name="SmartClass", monitor_interval=MONITOR_INTERVAL,
+                 thumb_max=THUMBNAIL_MAX, thumb_quality=THUMBNAIL_QUALITY,
+                 ssl_context=None, require_approval=False, approved=None,
+                 on_approved_change=None):
+        """discovery_port=None disables answering LAN discovery probes.
+
+        require_approval: new PCs wait for the teacher before they can be
+        controlled. approved: agent ids already paired. on_approved_change:
+        called with the sorted id list whenever that set changes, to persist it.
+        """
         self.class_code = normalize_class_code(class_code)
         self.teacher_key = teacher_key
         self.host = host
         self.requested_port = port
         self.discovery_port = discovery_port
         self.name = name
-        self.agents = {}  # agent_id -> _Agent
+        self.monitor_interval = monitor_interval
+        self.thumb_max = thumb_max
+        self.thumb_quality = thumb_quality
+        self.ssl_context = ssl_context
+        self.require_approval = require_approval
+        self.approved = set(approved or [])
+        self._on_approved_change = on_approved_change
+        self.agents = {}  # agent_id -> _Agent (paired and connected; controllable)
+        self.pending = {}  # agent_id -> _Agent (connected, awaiting approval)
         self.teachers = set()
+        self.watch_intent = {}  # teacher ws -> "all" | set(agent_id); which screens it watches
         self._server = None
         self._discovery = None
 
@@ -65,12 +89,14 @@ class Hub:
     async def start(self):
         self._server = await serve(
             self._handle, self.host, self.requested_port,
-            ping_interval=10, ping_timeout=20,
+            ping_interval=10, ping_timeout=20, ssl=self.ssl_context, max_size=MAX_WS_SIZE,
         )
-        log.info("Hub listening on %s:%s", self.host, self.port)
+        log.info("Hub listening on %s:%s (%s)", self.host, self.port,
+                 "TLS" if self.ssl_context else "no TLS")
         if self.discovery_port is not None:
             try:
-                self._discovery = await discovery.start_responder(self.port, self.name, self.discovery_port)
+                self._discovery = await discovery.start_responder(
+                    self.port, self.name, self.discovery_port, tls=self.ssl_context is not None)
             except OSError as e:
                 log.warning("LAN discovery disabled: %s", e)
 
@@ -120,14 +146,67 @@ class Hub:
             "connected_at": time.time(),
             "state": {},
         })
+
+        if self.require_approval and agent_id not in self.approved:
+            if not await self._await_approval(agent_id, entry, ws):
+                return  # denied or disconnected before approval
+        else:
+            await self._activate(agent_id, entry, paired=False)
+        await self._run_active(agent_id, entry, ws)
+
+    async def _await_approval(self, agent_id, entry, ws):
+        """Hold a new agent as pending until the teacher approves it. True if approved."""
+        old = self.pending.get(agent_id)
+        self.pending[agent_id] = entry
+        if old and old.approval and not old.approval.done():
+            old.approval.set_result(False)  # a newer connection takes its place
+        entry.approval = asyncio.get_running_loop().create_future()
+        await ws.send(encode("welcome", status="pending"))
+        log.info("Agent %s (%s) is waiting for approval", entry.info["name"], entry.info["address"])
+        self._notify_pending_changed()
+
+        drain = asyncio.create_task(self._drain(ws))
+        try:
+            await asyncio.wait({drain, entry.approval}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            # Fully stop the drain's recv() before _run_active starts its own —
+            # websockets forbids two coroutines calling recv() at once.
+            drain.cancel()
+            try:
+                await drain
+            except asyncio.CancelledError:
+                pass
+            if self.pending.get(agent_id) is entry:
+                del self.pending[agent_id]
+                self._notify_pending_changed()
+
+        if entry.approval.done() and entry.approval.result():
+            await self._activate(agent_id, entry, paired=True)
+            return True
+        if entry.approval.done() and entry.approval.result() is False:
+            await ws.close(CLOSE_DENIED, "not approved")
+        return False
+
+    async def _drain(self, ws):
+        """Consume (and ignore) frames from a pending agent until it disconnects."""
+        try:
+            while True:
+                await ws.recv()
+        except ConnectionClosed:
+            pass
+
+    async def _activate(self, agent_id, entry, paired):
         old = self.agents.get(agent_id)
         self.agents[agent_id] = entry
         if old:
             await old.ws.close(CLOSE_REPLACED, "replaced by a newer connection")
         log.info("Agent %s (%s) connected", entry.info["name"], entry.info["address"])
-        await ws.send(encode("welcome"))
+        await entry.ws.send(encode("paired") if paired else encode("welcome"))
         self._notify_agents_changed()
+        # A teacher may already be watching this PC (e.g. after it reconnects).
+        await self._sync_monitoring()
 
+    async def _run_active(self, agent_id, entry, ws):
         try:
             async for raw in ws:
                 try:
@@ -144,6 +223,12 @@ class Hub:
                     if msg["state"] != entry.info["state"]:
                         entry.info["state"] = msg["state"]
                         self._notify_agents_changed()
+                elif msg["type"] == "frame":
+                    self._to_watchers(agent_id, encode(
+                        "frame", agent_id=agent_id, image=msg.get("image"),
+                        format=msg.get("format"), w=msg.get("w"), h=msg.get("h"),
+                        window=msg.get("window"), ts=msg.get("ts"),
+                    ))
         except ConnectionClosed:
             pass
         finally:
@@ -164,6 +249,7 @@ class Hub:
         try:
             await ws.send(encode("welcome", class_code=self.class_code))
             await ws.send(self._agents_message())
+            await ws.send(self._pending_message())
             async for raw in ws:
                 try:
                     msg = decode(raw)
@@ -172,10 +258,17 @@ class Hub:
                     continue
                 if msg["type"] == "command":
                     await self._dispatch(ws, msg)
+                elif msg["type"] == "watch":
+                    self._set_watch(ws, msg.get("agents"))
+                    await self._sync_monitoring()
+                elif msg["type"] == "pair":
+                    await self._pair(msg.get("action"), msg.get("agents") or [])
         except ConnectionClosed:
             pass
         finally:
             self.teachers.discard(ws)
+            if self.watch_intent.pop(ws, None) is not None:
+                await self._sync_monitoring()
 
     async def _dispatch(self, teacher_ws, msg):
         cmd_id = str(msg.get("id") or new_id())
@@ -196,3 +289,68 @@ class Hub:
 
     def _to_teachers(self, message):
         broadcast(self.teachers, message)
+
+    # ---- pairing approval ----
+
+    def _pending_message(self):
+        return encode("pending", pending=[a.info for a in self.pending.values()])
+
+    def _notify_pending_changed(self):
+        self._to_teachers(self._pending_message())
+
+    def _save_approved(self):
+        if self._on_approved_change:
+            self._on_approved_change(sorted(self.approved))
+
+    async def _pair(self, action, agent_ids):
+        for agent_id in (str(a) for a in agent_ids):
+            if action == "approve":
+                self.approved.add(agent_id)
+                entry = self.pending.get(agent_id)
+                if entry and entry.approval and not entry.approval.done():
+                    entry.approval.set_result(True)  # its handler promotes it
+            elif action == "deny":
+                entry = self.pending.get(agent_id)
+                if entry and entry.approval and not entry.approval.done():
+                    entry.approval.set_result(False)
+            elif action == "remove":
+                self.approved.discard(agent_id)
+                active = self.agents.get(agent_id)
+                if active:
+                    await active.ws.close(CLOSE_DENIED, "approval revoked")
+        if action in ("approve", "remove"):
+            self._save_approved()
+
+    # ---- screen monitoring ----
+
+    def _set_watch(self, ws, agents):
+        if agents == "all":
+            self.watch_intent[ws] = "all"
+        elif isinstance(agents, list):
+            self.watch_intent[ws] = {str(a) for a in agents}
+        else:
+            self.watch_intent.pop(ws, None)
+
+    def _watchers_of(self, agent_id):
+        return [ws for ws, intent in self.watch_intent.items()
+                if intent == "all" or agent_id in intent]
+
+    def _to_watchers(self, agent_id, message):
+        broadcast(self._watchers_of(agent_id), message)
+
+    async def _sync_monitoring(self):
+        """Tell each agent to start or stop streaming as its watcher set changes."""
+        for agent_id, agent in self.agents.items():
+            wanted = bool(self._watchers_of(agent_id))
+            if wanted == agent.monitoring:
+                continue
+            agent.monitoring = wanted
+            if wanted:
+                message = encode("monitor", active=True, interval=self.monitor_interval,
+                                 max_px=self.thumb_max, quality=self.thumb_quality)
+            else:
+                message = encode("monitor", active=False)
+            try:
+                await agent.ws.send(message)
+            except ConnectionClosed:
+                pass

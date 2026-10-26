@@ -14,9 +14,10 @@ _PROBE = json.dumps({"t": "smartclass-discover", "v": 1}).encode()
 
 
 class _Responder(asyncio.DatagramProtocol):
-    def __init__(self, hub_port, name):
+    def __init__(self, hub_port, name, tls):
         self.hub_port = hub_port
         self.name = name
+        self.tls = tls
         self.transport = None
 
     def connection_made(self, transport):
@@ -28,15 +29,16 @@ class _Responder(asyncio.DatagramProtocol):
         except ValueError:
             return
         if isinstance(msg, dict) and msg.get("t") == "smartclass-discover":
-            reply = {"t": "smartclass-hub", "v": 1, "port": self.hub_port, "name": self.name}
+            reply = {"t": "smartclass-hub", "v": 1, "port": self.hub_port,
+                     "name": self.name, "tls": self.tls}
             self.transport.sendto(json.dumps(reply).encode(), addr)
 
 
-async def start_responder(hub_port, name, port=DISCOVERY_PORT):
+async def start_responder(hub_port, name, port=DISCOVERY_PORT, tls=False):
     """Answer discovery probes until the returned transport is closed."""
     loop = asyncio.get_running_loop()
     transport, _ = await loop.create_datagram_endpoint(
-        lambda: _Responder(hub_port, name),
+        lambda: _Responder(hub_port, name, tls),
         local_addr=("0.0.0.0", port),
         allow_broadcast=True,
     )
@@ -57,7 +59,8 @@ def discover(timeout=2.0, port=DISCOVERY_PORT, target="255.255.255.255"):
                 except ValueError:
                     continue
                 if isinstance(msg, dict) and msg.get("t") == "smartclass-hub" and isinstance(msg.get("port"), int):
-                    return f"ws://{host}:{msg['port']}"
+                    scheme = "wss" if msg.get("tls") else "ws"
+                    return f"{scheme}://{host}:{msg['port']}"
         except OSError:  # includes socket.timeout
             return None
 

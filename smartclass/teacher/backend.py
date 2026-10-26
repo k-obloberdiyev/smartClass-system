@@ -12,9 +12,11 @@ import threading
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidURI
 
+from ..common import config, tls
 from ..common.protocol import (
     CLOSE_AUTH_FAILED,
     DISCOVERY_PORT,
+    MAX_WS_SIZE,
     TEACHER,
     ProtocolError,
     decode,
@@ -53,38 +55,64 @@ class Backend:
         asyncio.run_coroutine_threadsafe(self._send(message), self._loop)
         return cmd_id
 
-    async def _send(self, message):
+    def watch(self, targets="all"):
+        """Set which screens to stream now ("all", a list of ids, or [] to stop)."""
+        message = encode("watch", agents=targets)
+        asyncio.run_coroutine_threadsafe(self._send(message, quiet=True), self._loop)
+
+    def pair(self, action, agents):
+        """Approve, deny, or remove PCs. agents is a list of agent ids."""
+        message = encode("pair", action=action, agents=list(agents))
+        asyncio.run_coroutine_threadsafe(self._send(message), self._loop)
+
+    async def _send(self, message, quiet=False):
         if self._ws is None:
-            self._emit("log", "Not connected to the hub; command not sent.")
+            if not quiet:
+                self._emit("log", "Not connected to the hub; command not sent.")
             return
         try:
             await self._ws.send(message)
         except ConnectionClosed:
-            self._emit("log", "Connection to the hub was lost; command not sent.")
+            if not quiet:
+                self._emit("log", "Connection to the hub was lost; command not sent.")
 
     def _emit(self, kind, data=None):
         self.events.put((kind, data))
 
+    def _save_approved(self, ids):
+        self.cfg["approved"] = ids
+        config.save("teacher", self.cfg)
+
     async def _main(self):
         if self.embedded:
+            ssl_context = None
+            scheme = "ws"
+            if self.cfg.get("tls", True):
+                cert_path, key_path = tls.ensure_hub_cert()
+                ssl_context = tls.server_context(cert_path, key_path)
+                scheme = "wss"
             self.hub = Hub(self.cfg["class_code"], self.cfg["teacher_key"],
-                           port=self.cfg["port"], discovery_port=DISCOVERY_PORT)
+                           port=self.cfg["port"], discovery_port=DISCOVERY_PORT,
+                           ssl_context=ssl_context, require_approval=self.cfg.get("require_approval", True),
+                           approved=self.cfg.get("approved", []), on_approved_change=self._save_approved)
             try:
                 await self.hub.start()
             except OSError as e:
                 self._emit("fatal", f"Could not start on port {self.cfg['port']}: {e}\n"
                                     "Is SmartClass Teacher already running?")
                 return
-            url = f"ws://127.0.0.1:{self.hub.port}"
+            url = f"{scheme}://127.0.0.1:{self.hub.port}"
         else:
             url = self.cfg["hub_url"]
         await self._connect_forever(url)
 
     async def _connect_forever(self, url):
+        ssl_context = tls.client_context() if url.startswith("wss://") else None
         backoff = 1
         while True:
             try:
-                async with connect(url, open_timeout=10, ping_interval=10, ping_timeout=20, proxy=None) as ws:
+                async with connect(url, open_timeout=10, ping_interval=10, ping_timeout=20,
+                                   proxy=None, ssl=ssl_context, max_size=MAX_WS_SIZE) as ws:
                     await ws.send(encode("hello", role=TEACHER, teacher_key=self.cfg["teacher_key"]))
                     welcome = decode(await asyncio.wait_for(ws.recv(), 10))
                     if welcome["type"] != "welcome":
