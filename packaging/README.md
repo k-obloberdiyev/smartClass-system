@@ -35,6 +35,14 @@ the teacher uses (Windows or macOS).
 Both targets have been validated by building and launching them on macOS; the
 same spec produces the Windows binaries when run on Windows.
 
+## Don't have a Windows machine? Use CI
+
+`.github/workflows/build.yml` builds both apps on GitHub's `windows-latest` and
+`macos-latest` runners and uploads them as artifacts. Trigger it from the
+repository's **Actions → Build executables → Run workflow**, or by pushing a
+`v*` tag, then download the `smartclass-windows` / `smartclass-macos` artifact
+from the run. This is how to get `smartclass-agent.exe` without a Windows PC.
+
 ## Notes
 
 - Both builds are **windowed** (no console). To see agent logs while

@@ -1,0 +1,38 @@
+name: Build executables
+
+# Builds the standalone agent and teacher apps on real Windows and macOS
+# runners (PyInstaller can't cross-compile, so each OS builds its own). The
+# results are uploaded as downloadable artifacts.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, smartclass-v2]
+    tags: ['v*']
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: smartclass-windows
+          - os: macos-latest
+            artifact: smartclass-macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build dependencies
+        run: pip install -r requirements-build.txt
+      - name: Build agent and teacher
+        run: python tools/build.py all
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
